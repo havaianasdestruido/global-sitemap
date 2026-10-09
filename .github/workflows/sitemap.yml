@@ -1,0 +1,65 @@
+# Builds the XML sitemap for https://havaianasdestruido.github.io/
+# (all subpages included) and commits it back to this repository.
+#
+# Token-less: no PAT or repository secrets are needed.
+#  - The Python script uses only public data (live site crawl + public
+#    GitHub API) — no token at all.
+#  - The commit step uses the built-in GITHUB_TOKEN that Actions
+#    provides automatically.
+
+name: Build XML sitemap
+
+on:
+  schedule:
+    - cron: "23 6 * * 1" # every Monday 06:23 UTC
+  workflow_dispatch: # manual run button
+  push: # rerun when the script or this workflow changes
+    branches: ["main"]
+    paths:
+      - "scripts/**"
+      - ".github/workflows/sitemap.yml"
+
+permissions:
+  contents: write # commit sitemap.xml with the built-in GITHUB_TOKEN
+
+concurrency:
+  group: sitemap
+  cancel-in-progress: false
+
+jobs:
+  sitemap:
+    runs-on: ubuntu-latest
+    env:
+      # Optional: raises the public API rate limit. Automatically provided
+      # by Actions — nothing to configure. The script works without it too.
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # stdlib only — no pip install needed
+
+      - name: Generate sitemap
+        run: |
+          python scripts/generate_sitemap.py \
+            --site-url https://havaianasdestruido.github.io/ \
+            --output sitemap.xml \
+            --robots-out robots.txt
+
+      - name: Commit sitemap if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          shopt -s nullglob
+          git add sitemap*.xml robots.txt
+          if git diff --cached --quiet; then
+            echo "No changes."
+          else
+            git commit -m "chore: update sitemap"
+            git push
+          fi
