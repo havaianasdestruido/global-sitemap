@@ -357,8 +357,17 @@ def atomic_write(path: Path, content: str) -> None:
     os.replace(tmp_path, path)
 
 
-def write_sitemap(entries: list[tuple[str, str | None]], out_path: Path, site_url: str) -> list[Path]:
-    """Write a sitemap.xml (urlset) or a sitemap index plus part files."""
+def write_sitemap(
+    entries: list[tuple[str, str | None]],
+    out_path: Path,
+    site_url: str,
+    sitemap_url: str | None = None,
+) -> list[Path]:
+    """Write a sitemap.xml (urlset) or a sitemap index plus part files.
+
+    sitemap_url is the public URL of out_path when the sitemap is not served
+    from the site root; the index's part URLs are resolved against it.
+    """
     written: list[Path] = []
 
     def urlset_xml(chunk: list[tuple[str, str | None]]) -> str:
@@ -394,7 +403,7 @@ def write_sitemap(entries: list[tuple[str, str | None]], out_path: Path, site_ur
     ]
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     for part_name in part_names:
-        part_url = urllib.parse.urljoin(site_url, part_name)
+        part_url = urllib.parse.urljoin(sitemap_url or site_url, part_name)
         index_lines.append("  <sitemap>")
         index_lines.append(f"    <loc>{xml_escape(part_url)}</loc>")
         index_lines.append(f"    <lastmod>{today}</lastmod>")
@@ -471,6 +480,12 @@ def main() -> int:
     parser.add_argument("--site-url", default=DEFAULT_SITE_URL, help="site root to crawl (default: %(default)s)")
     parser.add_argument("--output", default="sitemap.xml", help="sitemap output path (default: %(default)s)")
     parser.add_argument("--robots-out", default=None, help="also write a robots.txt pointing at the sitemap")
+    parser.add_argument(
+        "--sitemap-url",
+        default=None,
+        help="public URL to advertise in robots.txt (default: --site-url joined with the --output file name). "
+        "Set this when the sitemap is not served from the site root.",
+    )
     parser.add_argument("--helper-url", default=DEFAULT_HELPER_URL, help="helper page listing site URLs")
     parser.add_argument("--no-helper", action="store_true", help="skip the helper page")
     parser.add_argument("--github-user", default=DEFAULT_GITHUB_USER, help="GitHub user for Pages discovery")
@@ -553,12 +568,12 @@ def main() -> int:
         return 1
 
     entries = sorted(pages.items())
-    written = write_sitemap(entries, out_path, site_url)
+    sitemap_url = args.sitemap_url or urllib.parse.urljoin(site_url, out_path.name)
+    written = write_sitemap(entries, out_path, site_url, sitemap_url)
     for path in written:
         log(f"wrote {path}")
 
     if args.robots_out:
-        sitemap_url = urllib.parse.urljoin(site_url, out_path.name)
         robots_path = Path(args.robots_out)
         write_robots(robots_path, sitemap_url)
         log(f"wrote {robots_path} (points at {sitemap_url})")

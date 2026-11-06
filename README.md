@@ -40,7 +40,7 @@ atomically so a crash never leaves a partial file.
 | File | Contents |
 |------|----------|
 | `sitemap.xml` | The sitemap (`urlset`). If there are more than 45,000 URLs it automatically becomes a sitemap index pointing at `sitemap-1.xml`, `sitemap-2.xml`, … |
-| `robots.txt` | `User-agent: *` + a `Sitemap:` line pointing at `sitemap.xml` |
+| `robots.txt` | `User-agent: *` + a `Sitemap:` line pointing at the sitemap's **public** URL (set with `--sitemap-url`; defaults to `--site-url` + the output file name) |
 
 ## Workflow
 
@@ -52,6 +52,20 @@ atomically so a crash never leaves a partial file.
 
 then commits the regenerated files as `github-actions[bot]` — or does
 nothing if the sitemap didn't change.
+
+Two details make that commit reliable:
+
+- **It can't fail on a race.** If someone pushes to `main` while the crawl is
+  running, the commit step fetches the new tip, replays the generated files
+  on top of it and pushes again (up to 5 attempts with backoff) instead of
+  dying with `! [rejected] main -> main (fetch first)`. Nothing a human
+  committed is ever lost — only `sitemap*.xml` and `robots.txt` are replaced.
+- **The result actually gets published.** Pushes made with the built-in
+  `GITHUB_TOKEN` don't start other workflows, so the `Deploy static content
+  to Pages` workflow would otherwise never run for a bot commit and GitHub
+  Pages would keep serving the previous sitemap. The workflow dispatches
+  that deploy explicitly (`workflow_dispatch` is the one exception to the
+  no-recursion rule), so still with no PAT and no secrets.
 
 ## Serving the sitemap where search engines expect it
 
@@ -76,9 +90,13 @@ python scripts/generate_sitemap.py
 python scripts/generate_sitemap.py \
   --site-url https://havaianasdestruido.github.io/ \
   --output sitemap.xml \
-  --robots-out robots.txt
+  --robots-out robots.txt \
+  --sitemap-url https://havaianasdestruido.github.io/global-sitemap/sitemap.xml
 ```
 
 Useful flags: `--seed URL` (extra start points), `--max-depth N`,
 `--max-urls N`, `--delay S`, `--no-helper`, `--no-github`, `--ignore-robots`,
-`--keep-query`. See `python scripts/generate_sitemap.py --help`.
+`--keep-query`, `--sitemap-url URL` (the public URL to write into
+`robots.txt` and into a sitemap index — use it when the sitemap is served
+from a subdirectory such as `/global-sitemap/`). See
+`python scripts/generate_sitemap.py --help`.
