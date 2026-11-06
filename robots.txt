@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://havaianasdestruido.github.io/global-sitemap/sitemap.xml
+Sitemap: https://havaianasdestruido.github.io/global-sitemap/sitemap.txt

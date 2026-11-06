@@ -1,4 +1,4 @@
-# Builds the XML sitemap for https://havaianasdestruido.github.io/
+# Builds the plain-text sitemap for https://havaianasdestruido.github.io/
 # (all subpages included) and commits it back to this repository.
 #
 # Token-less: no PAT or repository secrets are needed.
@@ -7,7 +7,7 @@
 #  - The commit step uses the built-in GITHUB_TOKEN that Actions
 #    provides automatically.
 
-name: Build XML sitemap
+name: Build plain-text sitemap
 
 on:
   schedule:
@@ -17,10 +17,11 @@ on:
     branches: ["main"]
     paths:
       - "scripts/**"
+      - "tests/**"
       - ".github/workflows/sitemap.yml"
 
 permissions:
-  contents: write # commit sitemap.xml with the built-in GITHUB_TOKEN
+  contents: write # commit sitemap.txt with the built-in GITHUB_TOKEN
   actions: write # ask the Pages workflow to redeploy (see the last step)
 
 concurrency:
@@ -45,16 +46,18 @@ jobs:
 
       # stdlib only — no pip install needed
 
+      - name: Test generator
+        run: python -m unittest discover -s tests -v
+
       - name: Generate sitemap
         run: |
-          # Drop part files from a previous, larger sitemap so stale
-          # sitemap-N.xml files are never carried over.
-          rm -f sitemap-*.xml
+          # Remove legacy XML output when migrating to the text sitemap.
+          rm -f sitemap.xml sitemap-*.xml
           python scripts/generate_sitemap.py \
             --site-url https://havaianasdestruido.github.io/ \
-            --output sitemap.xml \
+            --output sitemap.txt \
             --robots-out robots.txt \
-            --sitemap-url https://havaianasdestruido.github.io/global-sitemap/sitemap.xml
+            --sitemap-url https://havaianasdestruido.github.io/global-sitemap/sitemap.txt
 
       # Another commit can land on main while the crawl runs (a manual edit,
       # a merge, or a second run of this workflow). A plain `git push` then
@@ -72,10 +75,10 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           shopt -s nullglob
 
-          # Save what we just generated (sitemap.xml, any sitemap-N.xml, robots.txt).
+          # Save what we just generated (sitemap.txt and robots.txt).
           generated="$RUNNER_TEMP/generated"
           mkdir -p "$generated"
-          for file in sitemap*.xml robots.txt; do
+          for file in sitemap.txt robots.txt; do
             if [ -e "$file" ]; then
               cp -p "$file" "$generated/"
             fi
@@ -91,12 +94,12 @@ jobs:
             # always leave a usable remote-tracking ref.
             git fetch --quiet --depth=1 origin main
             git checkout --quiet --force --detach FETCH_HEAD
-            # Drop part files left over from a previous, larger sitemap.
-            rm -f sitemap-*.xml
+            # Remove legacy XML output, including any old part files.
+            rm -f sitemap.xml sitemap-*.xml
             cp -p "$generated"/* .
             # Globs are quoted so git expands them itself: that way deletions
             # of stale sitemap-N.xml files are staged too.
-            git add -A -- 'sitemap*.xml' robots.txt
+            git add -A -- sitemap.txt 'sitemap*.xml' robots.txt
             if git diff --cached --quiet; then
               echo "No changes (main already up to date)."
               exit 0
@@ -116,7 +119,7 @@ jobs:
       # Events created with GITHUB_TOKEN never start another workflow, so the
       # push above does NOT trigger static.yml (Pages) on its own. Pages here
       # uses build_type=workflow, so without an explicit dispatch the freshly
-      # committed sitemap.xml would never be published. workflow_dispatch is
+      # committed sitemap.txt would never be published. workflow_dispatch is
       # the documented exception to that rule, so this works token-lessly.
       - name: Redeploy Pages
         if: steps.commit.outputs.pushed == 'true'
