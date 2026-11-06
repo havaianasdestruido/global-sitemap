@@ -21,6 +21,7 @@ on:
 
 permissions:
   contents: write # commit sitemap.xml with the built-in GITHUB_TOKEN
+  actions: write # ask the Pages workflow to redeploy (see the last step)
 
 concurrency:
   group: sitemap
@@ -46,20 +47,81 @@ jobs:
 
       - name: Generate sitemap
         run: |
+          # Drop part files from a previous, larger sitemap so stale
+          # sitemap-N.xml files are never carried over.
+          rm -f sitemap-*.xml
           python scripts/generate_sitemap.py \
             --site-url https://havaianasdestruido.github.io/ \
             --output sitemap.xml \
-            --robots-out robots.txt
+            --robots-out robots.txt \
+            --sitemap-url https://havaianasdestruido.github.io/global-sitemap/sitemap.xml
 
+      # Another commit can land on main while the crawl runs (a manual edit,
+      # a merge, or a second run of this workflow). A plain `git push` then
+      # fails with "fetch first" and the whole run goes red.
+      #
+      # So: keep the freshly generated files aside, then on every attempt
+      # reset the working tree to the current origin/main tip and copy the
+      # generated files over it before committing. Those files are the
+      # authoritative output, so they simply replace whatever main has —
+      # no merge, no conflict, and nothing a human committed gets lost.
       - name: Commit sitemap if changed
+        id: commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           shopt -s nullglob
-          git add sitemap*.xml robots.txt
-          if git diff --cached --quiet; then
-            echo "No changes."
-          else
-            git commit -m "chore: update sitemap"
-            git push
+
+          # Save what we just generated (sitemap.xml, any sitemap-N.xml, robots.txt).
+          generated="$RUNNER_TEMP/generated"
+          mkdir -p "$generated"
+          for file in sitemap*.xml robots.txt; do
+            if [ -e "$file" ]; then
+              cp -p "$file" "$generated/"
+            fi
+          done
+          if [ -z "$(ls -A "$generated")" ]; then
+            echo "::error::Nothing was generated."
+            exit 1
           fi
+
+          for attempt in 1 2 3 4 5; do
+            # --depth=1 keeps the shallow clone shallow; FETCH_HEAD is used
+            # instead of origin/main because actions/checkout's clone doesn't
+            # always leave a usable remote-tracking ref.
+            git fetch --quiet --depth=1 origin main
+            git checkout --quiet --force --detach FETCH_HEAD
+            # Drop part files left over from a previous, larger sitemap.
+            rm -f sitemap-*.xml
+            cp -p "$generated"/* .
+            # Globs are quoted so git expands them itself: that way deletions
+            # of stale sitemap-N.xml files are staged too.
+            git add -A -- 'sitemap*.xml' robots.txt
+            if git diff --cached --quiet; then
+              echo "No changes (main already up to date)."
+              exit 0
+            fi
+            git commit --quiet -m "chore: update sitemap"
+            if git push --quiet origin HEAD:main; then
+              echo "Pushed on attempt $attempt."
+              echo "pushed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Push rejected (attempt $attempt) — main moved, retrying on the new tip."
+            sleep $((attempt * 5))
+          done
+          echo "::error::Could not push the sitemap after 5 attempts — main kept moving."
+          exit 1
+
+      # Events created with GITHUB_TOKEN never start another workflow, so the
+      # push above does NOT trigger static.yml (Pages) on its own. Pages here
+      # uses build_type=workflow, so without an explicit dispatch the freshly
+      # committed sitemap.xml would never be published. workflow_dispatch is
+      # the documented exception to that rule, so this works token-lessly.
+      - name: Redeploy Pages
+        if: steps.commit.outputs.pushed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run static.yml --ref main \
+            || echo "::warning::Could not dispatch the Pages deploy — the new sitemap is committed but not yet published."
