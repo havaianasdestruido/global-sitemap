@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build an XML sitemap for https://havaianasdestruido.github.io/ (all subpages).
+"""Build a plain-text sitemap for https://havaianasdestruido.github.io/ (all subpages).
 
 Discovers every page of the site without any credentials:
 
@@ -20,7 +20,7 @@ replaced atomically so a crash never leaves a partial sitemap behind.
 
 Usage:
     python scripts/generate_sitemap.py
-    python scripts/generate_sitemap.py --output sitemap.xml --robots-out robots.txt
+    python scripts/generate_sitemap.py --output sitemap.txt --robots-out robots.txt
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import deque
-from datetime import datetime, timezone
+from datetime import timezone
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from pathlib import Path
@@ -47,7 +47,8 @@ DEFAULT_HELPER_URL = "https://havaianasdestruido.github.io/gh-pages/URL.html"
 DEFAULT_GITHUB_USER = "havaianasdestruido"
 
 # 50,000 URLs / 50MB per sitemap file is the protocol limit; stay under it.
-SITEMAP_PART_LIMIT = 45_000
+SITEMAP_URL_LIMIT = 50_000
+SITEMAP_BYTE_LIMIT = 50 * 1024 * 1024
 # Cap the amount of HTML read per page so a runaway page can't eat memory.
 MAX_PAGE_BYTES = 2 * 1024 * 1024
 
@@ -347,10 +348,6 @@ def robots_allows(rules: dict[str, list[tuple[bool, str]]], url: str) -> bool:
     return decision
 
 
-def xml_escape(url: str) -> str:
-    return url.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
 def atomic_write(path: Path, content: str) -> None:
     tmp_path = path.with_name(path.name + ".tmp")
     tmp_path.write_text(content, encoding="utf-8")
@@ -360,58 +357,17 @@ def atomic_write(path: Path, content: str) -> None:
 def write_sitemap(
     entries: list[tuple[str, str | None]],
     out_path: Path,
-    site_url: str,
-    sitemap_url: str | None = None,
 ) -> list[Path]:
-    """Write a sitemap.xml (urlset) or a sitemap index plus part files.
+    """Write a UTF-8 text sitemap: one absolute URL per line, no metadata.
 
-    sitemap_url is the public URL of out_path when the sitemap is not served
-    from the site root; the index's part URLs are resolved against it.
+    Refuse oversized output rather than publishing an invalid text sitemap.
+    Text sitemaps cannot contain an index of part files.
     """
-    written: list[Path] = []
-
-    def urlset_xml(chunk: list[tuple[str, str | None]]) -> str:
-        lines = [
-            '<?xml version="1.0" encoding="UTF-8"?>',
-            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
-        ]
-        for url, lastmod in chunk:
-            lines.append("  <url>")
-            lines.append(f"    <loc>{xml_escape(url)}</loc>")
-            if lastmod:
-                lines.append(f"    <lastmod>{lastmod}</lastmod>")
-            lines.append("  </url>")
-        lines.append("</urlset>")
-        return "\n".join(lines) + "\n"
-
-    if len(entries) <= SITEMAP_PART_LIMIT:
-        atomic_write(out_path, urlset_xml(entries))
-        written.append(out_path)
-        return written
-
-    part_names: list[str] = []
-    for index, start in enumerate(range(0, len(entries), SITEMAP_PART_LIMIT), start=1):
-        part_name = f"sitemap-{index}.xml"
-        part_path = out_path.with_name(part_name)
-        atomic_write(part_path, urlset_xml(entries[start : start + SITEMAP_PART_LIMIT]))
-        written.append(part_path)
-        part_names.append(part_name)
-
-    index_lines = [
-        '<?xml version="1.0" encoding="UTF-8"?>',
-        '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
-    ]
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    for part_name in part_names:
-        part_url = urllib.parse.urljoin(sitemap_url or site_url, part_name)
-        index_lines.append("  <sitemap>")
-        index_lines.append(f"    <loc>{xml_escape(part_url)}</loc>")
-        index_lines.append(f"    <lastmod>{today}</lastmod>")
-        index_lines.append("  </sitemap>")
-    index_lines.append("</sitemapindex>")
-    atomic_write(out_path, "\n".join(index_lines) + "\n")
-    written.insert(0, out_path)
-    return written
+    content = "".join(url + "\n" for url, _lastmod in entries)
+    if len(entries) > SITEMAP_URL_LIMIT or len(content.encode("utf-8")) > SITEMAP_BYTE_LIMIT:
+        raise ValueError("Text sitemap exceeds the 50,000 URL / 50 MiB limit")
+    atomic_write(out_path, content)
+    return [out_path]
 
 
 def write_robots(robots_path: Path, sitemap_url: str) -> None:
@@ -478,7 +434,7 @@ def crawl(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--site-url", default=DEFAULT_SITE_URL, help="site root to crawl (default: %(default)s)")
-    parser.add_argument("--output", default="sitemap.xml", help="sitemap output path (default: %(default)s)")
+    parser.add_argument("--output", default="sitemap.txt", help="sitemap output path (default: %(default)s)")
     parser.add_argument("--robots-out", default=None, help="also write a robots.txt pointing at the sitemap")
     parser.add_argument(
         "--sitemap-url",
@@ -569,7 +525,7 @@ def main() -> int:
 
     entries = sorted(pages.items())
     sitemap_url = args.sitemap_url or urllib.parse.urljoin(site_url, out_path.name)
-    written = write_sitemap(entries, out_path, site_url, sitemap_url)
+    written = write_sitemap(entries, out_path)
     for path in written:
         log(f"wrote {path}")
 
