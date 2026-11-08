@@ -1,7 +1,7 @@
 # global-sitemap
 
 A **token-less** GitHub Actions workflow + Python script that builds a plain-text
-sitemap with **every URL** of [havaianasdestruido.github.io](https://havaianasdestruido.github.io/) —
+sitemap with **every URL** of [pato.is-a.dev](https://pato.is-a.dev/) —
 including all subpages and every GitHub Pages project site under
 `https://havaianasdestruido.github.io/<repo>/`.
 
@@ -17,13 +17,13 @@ including all subpages and every GitHub Pages project site under
 
 ## How URLs are discovered
 
-1. **Live crawl** — breadth-first from `https://havaianasdestruido.github.io/`,
+1. **Live crawl** — breadth-first from `https://pato.is-a.dev/`,
    following every same-host link, so nested subpages are all found
    (`…/some/page/`, project sites `…/<repo>/…`, etc.). `index.html` URLs are
    canonicalized to their directory form, `noindex` pages are excluded, and
    `robots.txt` is honored (disable with `--ignore-robots`).
 2. **Helper index** — seeds from the weekly repo-website list at
-   [`gh-pages/URL.html`](https://havaianasdestruido.github.io/gh-pages/URL.html)
+   [`gh-pages/URL.html`](https://pato.is-a.dev/gh-pages/URL.html)
    (same-host entries only; external hosts like `*.vercel.app` are correctly
    left out of your sitemap).
 3. **GitHub Pages discovery** — the public
@@ -70,7 +70,7 @@ Two details make that commit reliable:
 ## Serving the sitemap where search engines expect it
 
 Google expects the sitemap at the root of the site it describes:
-`https://havaianasdestruido.github.io/sitemap.txt`. For that, copy
+`https://pato.is-a.dev/sitemap.txt`. For that, copy
 `scripts/generate_sitemap.py` and `.github/workflows/sitemap.yml` into the
 [`havaianasdestruido.github.io`](https://github.com/havaianasdestruido/havaianasdestruido.github.io)
 repo — still zero secrets. From this repo the files are committed here, and
@@ -88,10 +88,10 @@ this repo can also publish them by enabling GitHub Pages on `main`
 python scripts/generate_sitemap.py
 # or with options:
 python scripts/generate_sitemap.py \
-  --site-url https://havaianasdestruido.github.io/ \
+  --site-url https://pato.is-a.dev/ \
   --output sitemap.txt \
   --robots-out robots.txt \
-  --sitemap-url https://havaianasdestruido.github.io/global-sitemap/sitemap.txt
+  --sitemap-url https://pato.is-a.dev/sitemap.txt
 ```
 
 Useful flags: `--seed URL` (extra start points), `--max-depth N`,

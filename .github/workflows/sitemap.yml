@@ -1,4 +1,4 @@
-# Builds the plain-text sitemap for https://havaianasdestruido.github.io/
+# Builds the plain-text sitemap for https://pato.is-a.dev/
 # (all subpages included) and commits it back to this repository.
 #
 # Token-less: no PAT or repository secrets are needed.
@@ -54,10 +54,10 @@ jobs:
           # Remove legacy XML output when migrating to the text sitemap.
           rm -f sitemap.xml sitemap-*.xml
           python scripts/generate_sitemap.py \
-            --site-url https://havaianasdestruido.github.io/ \
+            --site-url https://pato.is-a.dev/ \
             --output sitemap.txt \
             --robots-out robots.txt \
-            --sitemap-url https://havaianasdestruido.github.io/global-sitemap/sitemap.txt
+            --sitemap-url https://pato.is-a.dev/sitemap.txt
 
       # Another commit can land on main while the crawl runs (a manual edit,
       # a merge, or a second run of this workflow). A plain `git push` then
