@@ -81,6 +81,13 @@ Two details make that commit reliable:
   dying with `! [rejected] main -> main (fetch first)`. Nothing a human
   committed is ever lost — only `sitemap.xml`, the `sitemap-N.xml` parts, the
   legacy `sitemap.txt`, and `robots.txt` are replaced.
+- **It can't fail on an empty pathspec.** The commit step stages
+  `sitemap*.xml`, the legacy `sitemap.txt`, and `robots.txt` through
+  `git ls-files -z ... | xargs -0 -r git add -A --`, then `git add -A`. A
+  plain `git add -A -- 'sitemap*.xml' sitemap.txt robots.txt` exits 128
+  ("pathspec … did not match any files") whenever one of those matches
+  nothing — which is the normal case now that `sitemap.txt` is deleted and
+  `sitemap-N.xml` parts only exist for sites over 50,000 URLs.
 - **The result actually gets published.** Pushes made with the built-in
   `GITHUB_TOKEN` don't start other workflows, so the `Deploy static content
   to Pages` workflow would otherwise never run for a bot commit and GitHub
