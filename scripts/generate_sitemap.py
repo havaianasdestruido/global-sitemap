@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a plain-text sitemap for https://pato.is-a.dev/ (all subpages).
+"""Build an XML sitemap for https://pato.is-a.dev/ (all subpages).
 
 Discovers every page of the site without any credentials:
 
@@ -14,13 +14,23 @@ Discovers every page of the site without any credentials:
    no token needed.  If the GITHUB_TOKEN environment variable is set it
    is used only to raise the API rate limit.
 
-Only dependency-free Python 3.9+ stdlib.  Requests have bounded
-timeouts with retries for transient failures, and output files are
-replaced atomically so a crash never leaves a partial sitemap behind.
+The output follows the Sitemaps XML protocol
+(https://www.sitemaps.org/protocol.html): a UTF-8
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"> document with
+entity-escaped, URL-escaped <loc> values and an optional <lastmod> taken
+from each page's Last-Modified header.  If the result would exceed the
+protocol limits (50,000 URLs or 50 MB per file) it is split into
+sitemap-1.xml, sitemap-2.xml, ... and out_path becomes a <sitemapindex>
+pointing at the parts.
+
+Only dependency-free Python 3.9+ stdlib (xml.sax.saxutils is stdlib too).
+Requests have bounded timeouts with retries for transient failures, and
+output files are replaced atomically so a crash never leaves a partial
+sitemap behind.
 
 Usage:
     python scripts/generate_sitemap.py
-    python scripts/generate_sitemap.py --output sitemap.txt --robots-out robots.txt
+    python scripts/generate_sitemap.py --output sitemap.xml --robots-out robots.txt
 """
 
 from __future__ import annotations
@@ -39,6 +49,7 @@ from datetime import timezone
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from pathlib import Path
+from xml.sax.saxutils import escape as _xml_escape
 
 USER_AGENT = "global-sitemap-generator/1.0 (+https://github.com/havaianasdestruido/global-sitemap)"
 
@@ -46,9 +57,23 @@ DEFAULT_SITE_URL = "https://pato.is-a.dev/"
 DEFAULT_HELPER_URL = "https://pato.is-a.dev/gh-pages/URL.html"
 DEFAULT_GITHUB_USER = "havaianasdestruido"
 
-# 50,000 URLs / 50MB per sitemap file is the protocol limit; stay under it.
+# 50,000 URLs / 50MB per sitemap file is the protocol limit.
 SITEMAP_URL_LIMIT = 50_000
 SITEMAP_BYTE_LIMIT = 50 * 1024 * 1024
+# A sitemap index may list at most 50,000 sitemap files.
+SITEMAP_INDEX_LIMIT = 50_000
+# Protocol namespace for both <urlset> and <sitemapindex> documents.
+SITEMAP_NS = "http://www.sitemaps.org/schemas/sitemap/0.9"
+URLSET_HEADER = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    f'<urlset xmlns="{SITEMAP_NS}">\n'
+)
+INDEX_HEADER = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    f'<sitemapindex xmlns="{SITEMAP_NS}">\n'
+)
+DOCUMENT_FOOTER = "</urlset>\n"
+INDEX_FOOTER = "</sitemapindex>\n"
 # Cap the amount of HTML read per page so a runaway page can't eat memory.
 MAX_PAGE_BYTES = 2 * 1024 * 1024
 
@@ -354,20 +379,105 @@ def atomic_write(path: Path, content: str) -> None:
     os.replace(tmp_path, path)
 
 
+def xml_escape(value: str) -> str:
+    """Entity-escape a value for XML text content (&, <, >, quotes)."""
+    return _xml_escape(value, {"\"": "&quot;", "'": "&apos;"})
+
+
+def url_entry(url: str, lastmod: str | None) -> str:
+    """Render one <url> element, entity-escaping the location."""
+    entry = f"  <url>\n    <loc>{xml_escape(url)}</loc>\n"
+    if lastmod:
+        entry += f"    <lastmod>{xml_escape(lastmod)}</lastmod>\n"
+    return entry + "  </url>\n"
+
+
+def part_sizes(entries: list[tuple[str, str | None]]) -> list[int]:
+    return [len(url_entry(url, lastmod).encode("utf-8")) for url, lastmod in entries]
+
+
+def url_host(url: str) -> str:
+    return (urllib.parse.urlsplit(url).hostname or "").lower()
+
+
+def split_entries(
+    entries: list[tuple[str, str | None]],
+    url_limit: int,
+    byte_limit: int,
+) -> list[list[tuple[str, str | None]]]:
+    """Group entries by host, then split each group to the per-file limits.
+
+    The protocol requires every file to list URLs from a single host, so a
+    host is never split across files unless it alone exceeds one file.
+    """
+    overhead = len(URLSET_HEADER.encode("utf-8")) + len(DOCUMENT_FOOTER.encode("utf-8"))
+    by_host: dict[str, list[tuple[str, str | None]]] = {}
+    for entry, size in zip(entries, part_sizes(entries)):
+        by_host.setdefault(url_host(entry[0]), []).append((entry, size))
+
+    chunks: list[list[tuple[str, str | None]]] = []
+    for host in sorted(by_host):
+        current: list[tuple[str, str | None]] = []
+        used = overhead
+        for (entry, size) in by_host[host]:
+            if size + overhead > byte_limit:
+                raise ValueError("A single URL entry exceeds the 50 MiB sitemap limit")
+            if current and (len(current) >= url_limit or used + size > byte_limit):
+                chunks.append(current)
+                current = []
+                used = overhead
+            current.append(entry)
+            used += size
+        if current:
+            chunks.append(current)
+    return chunks
+
+
 def write_sitemap(
     entries: list[tuple[str, str | None]],
     out_path: Path,
+    sitemap_url: str | None = None,
 ) -> list[Path]:
-    """Write a UTF-8 text sitemap: one absolute URL per line, no metadata.
+    """Write an XML sitemap, or a sitemap index plus parts when oversized.
 
-    Refuse oversized output rather than publishing an invalid text sitemap.
-    Text sitemaps cannot contain an index of part files.
+    Returns every file written, the index (or single sitemap) first.
+    Entries are sorted and de-duplicated so output is deterministic.
+    Each part stays under 50,000 URLs / 50 MiB; if more than one part is
+    needed, out_path becomes a <sitemapindex> listing the sibling parts.
     """
-    content = "".join(url + "\n" for url, _lastmod in entries)
-    if len(entries) > SITEMAP_URL_LIMIT or len(content.encode("utf-8")) > SITEMAP_BYTE_LIMIT:
-        raise ValueError("Text sitemap exceeds the 50,000 URL / 50 MiB limit")
-    atomic_write(out_path, content)
-    return [out_path]
+    entries = sorted(dict(entries).items())
+    chunks = split_entries(entries, SITEMAP_URL_LIMIT, SITEMAP_BYTE_LIMIT)
+    if not chunks:
+        chunks = [[]]
+
+    if len(chunks) == 1:
+        body = "".join(url_entry(url, lastmod) for url, lastmod in chunks[0])
+        atomic_write(out_path, URLSET_HEADER + body + DOCUMENT_FOOTER)
+        return [out_path]
+
+    if len(chunks) > SITEMAP_INDEX_LIMIT:
+        raise ValueError("Sitemap index exceeds the 50,000 sitemap limit")
+
+    stem, suffix = out_path.stem, (out_path.suffix or ".xml")
+    part_paths = [
+        out_path.with_name(f"{stem}-{number}{suffix}") for number in range(1, len(chunks) + 1)
+    ]
+    for path, chunk in zip(part_paths, chunks):
+        body = "".join(url_entry(url, lastmod) for url, lastmod in chunk)
+        atomic_write(path, URLSET_HEADER + body + DOCUMENT_FOOTER)
+
+    # Index <loc> values must be absolute URLs on the same host as the index.
+    # sitemap_url is the public URL of out_path; without one, fall back to
+    # the bare part file names.
+    base = sitemap_url or ""
+    index_entries: list[str] = []
+    for path in part_paths:
+        loc = urllib.parse.urljoin(base, path.name) if base else path.name
+        index_entries.append(
+            "  <sitemap>\n    <loc>" + xml_escape(loc) + "</loc>\n  </sitemap>\n"
+        )
+    atomic_write(out_path, INDEX_HEADER + "".join(index_entries) + INDEX_FOOTER)
+    return [out_path, *part_paths]
 
 
 def write_robots(robots_path: Path, sitemap_url: str) -> None:
@@ -434,7 +544,13 @@ def crawl(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--site-url", default=DEFAULT_SITE_URL, help="site root to crawl (default: %(default)s)")
-    parser.add_argument("--output", default="sitemap.txt", help="sitemap output path (default: %(default)s)")
+    parser.add_argument(
+        "--output",
+        default="sitemap.xml",
+        help="sitemap output path; a sitemap index plus sitemap-1.xml, ... parts "
+        "is written when the URL count or size exceeds the protocol limits "
+        "(default: %(default)s)",
+    )
     parser.add_argument("--robots-out", default=None, help="also write a robots.txt pointing at the sitemap")
     parser.add_argument(
         "--sitemap-url",
@@ -525,7 +641,7 @@ def main() -> int:
 
     entries = sorted(pages.items())
     sitemap_url = args.sitemap_url or urllib.parse.urljoin(site_url, out_path.name)
-    written = write_sitemap(entries, out_path)
+    written = write_sitemap(entries, out_path, sitemap_url)
     for path in written:
         log(f"wrote {path}")
 
@@ -534,7 +650,13 @@ def main() -> int:
         write_robots(robots_path, sitemap_url)
         log(f"wrote {robots_path} (points at {sitemap_url})")
 
-    print(f"Sitemap: {len(entries)} URL(s) -> {out_path}")
+    if len(written) > 1:
+        print(
+            f"Sitemap index: {len(entries)} URL(s) in {len(written) - 1} part(s) "
+            f"-> {out_path}"
+        )
+    else:
+        print(f"Sitemap: {len(entries)} URL(s) -> {out_path}")
     return 0
 
 

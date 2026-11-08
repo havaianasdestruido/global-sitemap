@@ -1,8 +1,9 @@
 # global-sitemap
 
-A **token-less** GitHub Actions workflow + Python script that builds a plain-text
-sitemap with **every URL** of [pato.is-a.dev](https://pato.is-a.dev/) —
-including all subpages and every GitHub Pages project site under
+A **token-less** GitHub Actions workflow + Python script that builds an **XML**
+sitemap ([sitemaps.org protocol](https://www.sitemaps.org/protocol.html)) with
+**every URL** of [pato.is-a.dev](https://pato.is-a.dev/) — including all
+subpages and every GitHub Pages project site under
 `https://havaianasdestruido.github.io/<repo>/`.
 
 ## Token-less by design
@@ -32,15 +33,34 @@ including all subpages and every GitHub Pages project site under
    `https://havaianasdestruido.github.io/<repo>/` and crawled for its own
    subpages too.
 
-Requests use bounded timeouts with retries, and `sitemap.txt` is replaced
+Requests use bounded timeouts with retries, and the sitemap is replaced
 atomically so a crash never leaves a partial file.
 
 ## Outputs
 
 | File | Contents |
 |------|----------|
-| `sitemap.txt` | UTF-8 text sitemap with one absolute URL per line (no XML or last-modified metadata). Limited to 50,000 URLs / 50 MiB; oversized output is rejected before replacing the file. |
+| `sitemap.xml` | UTF-8 XML `<urlset>` in the `http://www.sitemaps.org/schemas/sitemap/0.9` namespace: one `<url>` per page with an entity-escaped `<loc>`, plus `<lastmod>` (W3C date) from each page's `Last-Modified` header when the server sends one. |
+| `sitemap-N.xml` | Only when the output doesn't fit one file. `sitemap.xml` then becomes a `<sitemapindex>` listing the parts. |
 | `robots.txt` | `User-agent: *` + a `Sitemap:` line pointing at the sitemap's **public** URL (set with `--sitemap-url`; defaults to `--site-url` + the output file name) |
+
+Protocol rules the writer enforces, so the output validates against
+[`sitemap.xsd`](https://www.sitemaps.org/schemas/sitemap/0.9/sitemap.xsd):
+
+- the document is UTF-8 and opens with
+  `<?xml version="1.0" encoding="UTF-8"?>`, then `<urlset>` / `<sitemapindex>`
+  carrying the standard namespace;
+- every `<loc>` is absolute and XML-entity-escaped (`&` → `&amp;`, `<`, `>`,
+  `'`, `"`), and URLs are already percent-encoded by the crawler;
+- all URLs in one file share a single host — a second host gets its own part
+  file and the root becomes an index;
+- each file stays at or below 50,000 URLs and 50 MiB (52,428,800 bytes,
+  measured with the full document including header and footer); a boundary
+  that would overflow starts a new part;
+- an index lists at most 50,000 sitemaps, with absolute `<loc>` values derived
+  from `--sitemap-url`;
+- entries are sorted and de-duplicated, so unchanged crawls produce
+  byte-identical files and the workflow can skip the commit.
 
 ## Workflow
 
@@ -59,7 +79,8 @@ Two details make that commit reliable:
   running, the commit step fetches the new tip, replays the generated files
   on top of it and pushes again (up to 5 attempts with backoff) instead of
   dying with `! [rejected] main -> main (fetch first)`. Nothing a human
-  committed is ever lost — only `sitemap.txt`, legacy `sitemap*.xml`, and `robots.txt` are replaced.
+  committed is ever lost — only `sitemap.xml`, the `sitemap-N.xml` parts, the
+  legacy `sitemap.txt`, and `robots.txt` are replaced.
 - **The result actually gets published.** Pushes made with the built-in
   `GITHUB_TOKEN` don't start other workflows, so the `Deploy static content
   to Pages` workflow would otherwise never run for a bot commit and GitHub
@@ -70,12 +91,12 @@ Two details make that commit reliable:
 ## Serving the sitemap where search engines expect it
 
 Google expects the sitemap at the root of the site it describes:
-`https://pato.is-a.dev/sitemap.txt`. For that, copy
+`https://pato.is-a.dev/sitemap.xml`. For that, copy
 `scripts/generate_sitemap.py` and `.github/workflows/sitemap.yml` into the
 [`havaianasdestruido.github.io`](https://github.com/havaianasdestruido/havaianasdestruido.github.io)
 repo — still zero secrets. From this repo the files are committed here, and
 this repo can also publish them by enabling GitHub Pages on `main`
-(then the sitemap lives at `…/global-sitemap/sitemap.txt`).
+(then the sitemap lives at `…/global-sitemap/sitemap.xml`).
 
 > Note: pushing into a *different* repo from this workflow would require a
 > PAT (like `GH_PAT` in the `gh-pages` repo) — that's the only scenario that
@@ -89,14 +110,14 @@ python scripts/generate_sitemap.py
 # or with options:
 python scripts/generate_sitemap.py \
   --site-url https://pato.is-a.dev/ \
-  --output sitemap.txt \
+  --output sitemap.xml \
   --robots-out robots.txt \
-  --sitemap-url https://pato.is-a.dev/sitemap.txt
+  --sitemap-url https://pato.is-a.dev/sitemap.xml
 ```
 
 Useful flags: `--seed URL` (extra start points), `--max-depth N`,
 `--max-urls N`, `--delay S`, `--no-helper`, `--no-github`, `--ignore-robots`,
-`--keep-query`, `--sitemap-url URL` (the public URL to write into
-`robots.txt` — use it when the sitemap is served
-from a subdirectory such as `/global-sitemap/`). See
+`--keep-query`, `--sitemap-url URL` (the public URL written into `robots.txt`
+and used for the `<loc>` values of a sitemap index — use it when the sitemap
+is served from a subdirectory such as `/global-sitemap/`). See
 `python scripts/generate_sitemap.py --help`.

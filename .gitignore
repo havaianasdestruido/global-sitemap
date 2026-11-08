@@ -1,4 +1,4 @@
 __pycache__/
 *.pyc
+sitemap.xml.tmp
 sitemap-*.xml.tmp
-sitemap.txt.tmp
