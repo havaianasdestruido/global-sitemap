@@ -89,21 +89,15 @@ jobs:
             exit 1
           fi
 
-          # Stage sitemap*.xml, sitemap.txt (legacy) and robots.txt.
-          #
-          # `git add` exits 128 with "pathspec ... did not match any files"
-          # when ANY pathspec matches nothing, and `-e` turns that into a
-          # failed job. After the move to XML, sitemap.txt is deleted and
-          # sitemap-N.xml parts exist only for >50k URL sites, so most runs
-          # have pathspecs that legitimately match nothing. Staging by the
-          # files git already tracks (git ls-files, which exits 0 when a
-          # pathspec is empty) makes those deletions show up in the diff,
-          # then `git add -A` with no pathspec picks up the new files and
-          # leaves everything else in the tree alone.
+          # Stage sitemap*.xml, sitemap.txt (legacy) and robots.txt only.
+          # The helper exists because `git add -A -- 'sitemap*.xml'
+          # sitemap.txt robots.txt` exits 128 ("pathspec ... did not match
+          # any files") as soon as one pattern matches nothing — the normal
+          # case now that sitemap.txt is gone — while a bare `git add -A`
+          # would sweep in unrelated scratch files. It is unit-tested in
+          # tests/test_stage_sitemap_files.py.
           stage_sitemap_files() {
-            git ls-files -z -- 'sitemap*.xml' sitemap.txt robots.txt \
-              | xargs -0 -r git add -A --
-            git add -A
+            bash scripts/stage_sitemap_files.sh
           }
 
           for attempt in 1 2 3 4 5; do
