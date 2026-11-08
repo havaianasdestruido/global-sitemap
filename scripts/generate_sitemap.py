@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a plain-text sitemap for https://havaianasdestruido.github.io/ (all subpages).
+"""Build a plain-text sitemap for https://pato.is-a.dev/ (all subpages).
 
 Discovers every page of the site without any credentials:
 
@@ -7,7 +7,7 @@ Discovers every page of the site without any credentials:
    same-host link (so subpages and GitHub Pages project sites under
    https://havaianasdestruido.github.io/<repo>/ are all found).
 2. Seeds extra URLs from the helper index
-   https://havaianasdestruido.github.io/gh-pages/URL.html (the weekly
+   https://pato.is-a.dev/gh-pages/URL.html (the weekly
    "Repo websites" list).
 3. Seeds URLs from the public GitHub API
    (GET /users/<user>/repos) for every repo with GitHub Pages enabled —
@@ -42,8 +42,8 @@ from pathlib import Path
 
 USER_AGENT = "global-sitemap-generator/1.0 (+https://github.com/havaianasdestruido/global-sitemap)"
 
-DEFAULT_SITE_URL = "https://havaianasdestruido.github.io/"
-DEFAULT_HELPER_URL = "https://havaianasdestruido.github.io/gh-pages/URL.html"
+DEFAULT_SITE_URL = "https://pato.is-a.dev/"
+DEFAULT_HELPER_URL = "https://pato.is-a.dev/gh-pages/URL.html"
 DEFAULT_GITHUB_USER = "havaianasdestruido"
 
 # 50,000 URLs / 50MB per sitemap file is the protocol limit; stay under it.
