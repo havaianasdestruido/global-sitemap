@@ -4,8 +4,8 @@
 Discovers every page of the site without any credentials:
 
 1. Crawls the live site breadth-first from --site-url, following every
-   same-host link (so subpages and GitHub Pages project sites under
-   https://havaianasdestruido.github.io/<repo>/ are all found).
+   same-site link (so subpages and GitHub Pages project sites under
+   https://pato.is-a.dev/<repo>/ are all found).
 2. Seeds extra URLs from the helper index
    https://pato.is-a.dev/gh-pages/URL.html (the weekly
    "Repo websites" list).
@@ -13,6 +13,15 @@ Discovers every page of the site without any credentials:
    (GET /users/<user>/repos) for every repo with GitHub Pages enabled —
    no token needed.  If the GITHUB_TOKEN environment variable is set it
    is used only to raise the API rate limit.
+
+Custom domains: once the GitHub Pages user site has a custom domain,
+GitHub answers every https://<user>.github.io/... request with a redirect
+to it, yet links, the helper index and the Pages API still use the
+github.io address.  Such a host is an *alias* of the site: it is detected
+by probing where https://<user>.github.io/ redirects (or set with
+--alias-host), and its URLs are moved onto the site host instead of being
+discarded as another site's.  Pages that redirect off the site are never
+listed, so every <loc> is a canonical address on a single host.
 
 The output follows the Sitemaps XML protocol
 (https://www.sitemaps.org/protocol.html): a UTF-8
@@ -45,6 +54,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import deque
+from collections.abc import Collection, Iterable
 from datetime import timezone
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
@@ -180,6 +190,56 @@ def is_asset_url(url: str) -> bool:
     return suffix in ASSET_EXTENSIONS
 
 
+def parse_host(value: str) -> str:
+    """Return the lowercase host of a bare hostname or a URL ('' if none)."""
+    value = value.strip()
+    if "://" not in value:
+        value = "//" + value
+    try:
+        return (urllib.parse.urlsplit(value).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def to_site_url(url: str, site_url: str, alias_hosts: Collection[str] = ()) -> str | None:
+    """Return url as a page of site_url's host, or None if it is off-site.
+
+    URLs on an alias host (one that only redirects to the site, such as
+    <user>.github.io once the user site has a custom domain) are moved onto
+    the site host, keeping path and query, so they are crawled and listed
+    under the canonical address instead of being dropped as off-site.
+    """
+    host = url_host(url)
+    site = urllib.parse.urlsplit(site_url)
+    if host and host == (site.hostname or "").lower():
+        return url
+    if host and host in alias_hosts:
+        parts = urllib.parse.urlsplit(url)
+        return urllib.parse.urlunsplit((site.scheme, site.netloc, parts.path, parts.query, ""))
+    return None
+
+
+def detect_alias_hosts(site_url: str, candidates: Iterable[str], timeout: float) -> list[str]:
+    """Return the candidate hosts whose root redirects to site_url's host.
+
+    GitHub Pages redirects every https://<user>.github.io/... request to the
+    user site's custom domain (project sites included), so with a custom
+    domain the github.io address is an alias of the site.  One probe per
+    candidate decides it from what the server actually does: no token, no
+    configuration, and it stops matching by itself if the domain is removed.
+    """
+    site_host = url_host(site_url)
+    aliases: list[str] = []
+    for candidate in candidates:
+        host = parse_host(candidate)
+        if not host or host == site_host or host in aliases:
+            continue
+        _status, final_url, _ctype, _body, _lastmod = fetch(f"https://{host}/", timeout)
+        if url_host(final_url) == site_host:
+            aliases.append(host)
+    return aliases
+
+
 def fetch(url: str, timeout: float, retries: int = 2):
     """GET a URL with bounded timeouts and retries.
 
@@ -268,13 +328,18 @@ def header_lastmod(last_modified: str | None) -> str | None:
         return None
 
 
-def github_pages_seeds(user: str, token: str | None) -> list[str]:
+def github_pages_seeds(user: str, token: str | None, homepage_hosts: Collection[str] = ()) -> list[str]:
     """Seed URLs for every public repo with GitHub Pages enabled.
 
     Uses the public /users/<user>/repos endpoint, so no token is required;
     GITHUB_TOKEN is used only when present, to raise the rate limit.
+
+    Pages URLs are built on https://<user>.github.io/ (map them onto a
+    custom domain with to_site_url).  A repo's "Website" field is kept too
+    when it points at <user>.github.io or one of homepage_hosts.
     """
     host = f"{user}.github.io".lower()
+    accepted_hosts = {host, *(h.lower() for h in homepage_hosts)}
     seeds: set[str] = set()
     headers = {"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"}
     if token:
@@ -302,13 +367,22 @@ def github_pages_seeds(user: str, token: str | None) -> list[str]:
             homepage = (repo.get("homepage") or "").strip()
             if homepage:
                 normalized = normalize_url(homepage)
-                if normalized and (urllib.parse.urlsplit(normalized).hostname or "").lower() == host:
+                if normalized and url_host(normalized) in accepted_hosts:
                     seeds.add(normalized)
     return sorted(seeds)
 
 
-def helper_seeds(helper_url: str, site_host: str, timeout: float) -> list[str]:
-    """Seed URLs scraped from the helper index (URL.html / URL.MD)."""
+def helper_seeds(
+    helper_url: str,
+    site_url: str,
+    timeout: float,
+    alias_hosts: Collection[str] = (),
+) -> list[str]:
+    """Seed URLs scraped from the helper index (URL.html / URL.MD).
+
+    Only entries on the site are kept; entries on an alias host are mapped
+    onto the site host, external sites (e.g. *.vercel.app) are left out.
+    """
     status, _final, content_type, body, _lastmod = fetch(helper_url, timeout)
     if status != 200 or not body:
         log(f"  ! helper page unavailable ({status}): {helper_url}")
@@ -316,8 +390,9 @@ def helper_seeds(helper_url: str, site_host: str, timeout: float) -> list[str]:
     text = decode_body(body, content_type)
     seeds: set[str] = set()
     for url in extract_urls_any_text(text):
-        if (urllib.parse.urlsplit(url).hostname or "").lower() == site_host:
-            seeds.add(url)
+        on_site = to_site_url(url, site_url, alias_hosts)
+        if on_site:
+            seeds.add(on_site)
     return sorted(seeds)
 
 
@@ -489,15 +564,22 @@ def write_robots(robots_path: Path, sitemap_url: str) -> None:
 
 def crawl(
     seeds: list[str],
-    site_host: str,
+    site_url: str,
     max_depth: int,
     max_urls: int,
     delay: float,
     timeout: float,
     keep_query: bool,
     robots_rules: dict[str, list[tuple[bool, str]]] | None,
+    alias_hosts: Collection[str] = (),
 ) -> dict[str, str | None]:
-    """Breadth-first crawl. Returns {page_url: lastmod_or_None} for HTML pages."""
+    """Breadth-first crawl. Returns {page_url: lastmod_or_None} for HTML pages.
+
+    Only pages on site_url's host are crawled and returned.  Seeds and links
+    on an alias host are moved onto the site host first, and a page whose
+    redirect leaves the site is skipped, so every returned URL is a
+    canonical address on the site.
+    """
     queue: deque[tuple[str, int]] = deque()
     seen: set[str] = set()
     pages: dict[str, str | None] = {}
@@ -505,8 +587,10 @@ def crawl(
     def enqueue(url: str, depth: int) -> None:
         if len(seen) >= max_urls:
             return
-        if (urllib.parse.urlsplit(url).hostname or "").lower() != site_host:
+        on_site = to_site_url(url, site_url, alias_hosts)
+        if on_site is None:
             return
+        url = on_site
         if is_asset_url(url) or url in seen:
             return
         if robots_rules is not None and not robots_allows(robots_rules, url):
@@ -522,7 +606,14 @@ def crawl(
         if delay:
             time.sleep(delay)
         status, final_url, content_type, body, last_modified = fetch(url, timeout)
-        final = normalize_url(final_url, keep_query=keep_query) or url
+        final = to_site_url(
+            normalize_url(final_url, keep_query=keep_query) or url, site_url, alias_hosts
+        )
+        if final is None:
+            # Redirected off the site (e.g. a project with its own domain):
+            # that page belongs to another site's sitemap, not this one.
+            log(f"  - skipped {url}: redirects off-site to {final_url}")
+            continue
         seen.add(final)  # don't re-queue a redirect target we just fetched
         if status != 200 or not body:
             continue
@@ -560,8 +651,25 @@ def main() -> int:
     )
     parser.add_argument("--helper-url", default=DEFAULT_HELPER_URL, help="helper page listing site URLs")
     parser.add_argument("--no-helper", action="store_true", help="skip the helper page")
-    parser.add_argument("--github-user", default=DEFAULT_GITHUB_USER, help="GitHub user for Pages discovery")
-    parser.add_argument("--no-github", action="store_true", help="skip GitHub Pages discovery")
+    parser.add_argument(
+        "--github-user",
+        default=DEFAULT_GITHUB_USER,
+        help="GitHub user for Pages discovery; <user>.github.io is treated as an alias of "
+        "--site-url when it redirects there (custom domain) (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--no-github",
+        action="store_true",
+        help="skip GitHub Pages discovery and the <user>.github.io alias probe",
+    )
+    parser.add_argument(
+        "--alias-host",
+        action="append",
+        default=[],
+        metavar="HOST",
+        help="host that serves the same site as --site-url (it redirects there); its URLs "
+        "are crawled and listed under the --site-url host (repeatable)",
+    )
     parser.add_argument("--seed", action="append", default=[], help="extra seed URL (repeatable)")
     parser.add_argument("--max-depth", type=int, default=8, help="max link depth to follow (default: %(default)s)")
     parser.add_argument("--max-urls", type=int, default=45_000, help="max pages in the sitemap (default: %(default)s)")
@@ -577,26 +685,55 @@ def main() -> int:
     if not site_url:
         log(f"error: invalid --site-url: {args.site_url}")
         return 2
-    site_host = urllib.parse.urlsplit(site_url).hostname or ""
+    site_host = url_host(site_url)
     out_path = Path(args.output)
 
     log(f"Crawling {site_url} (host {site_host})")
+
+    # Hosts serving this same site, whose URLs are mapped onto site_host.
+    alias_hosts: set[str] = set()
+    for value in args.alias_host:
+        host = parse_host(value)
+        if not host:
+            log(f"error: invalid --alias-host: {value}")
+            return 2
+        if host != site_host:
+            alias_hosts.add(host)
+    if not args.no_github and args.github_user:
+        github_host = f"{args.github_user}.github.io".lower()
+        if github_host != site_host and github_host not in alias_hosts:
+            if detect_alias_hosts(site_url, [github_host], args.timeout):
+                alias_hosts.add(github_host)
+                log(f"Alias: {github_host} redirects to {site_host} (custom domain)")
+            else:
+                log(
+                    f"Alias: {github_host} does not redirect to {site_host}; "
+                    "its URLs are skipped (use --alias-host to override)"
+                )
+    for host in sorted(alias_hosts):
+        log(f"  URLs on {host} are crawled and listed as {site_host} pages")
 
     seeds: set[str] = {site_url}
 
     if not args.no_helper:
         log("Seed 1/3: helper URL index")
-        helper = helper_seeds(args.helper_url, site_host, args.timeout)
-        log(f"  + {len(helper)} same-host seed(s) from {args.helper_url}")
+        helper = helper_seeds(args.helper_url, site_url, args.timeout, alias_hosts)
+        log(f"  + {len(helper)} same-site seed(s) from {args.helper_url}")
         seeds.update(helper)
     else:
         log("Seed 1/3: helper URL index (skipped)")
 
     if not args.no_github and args.github_user:
         log("Seed 2/3: GitHub Pages repos (public API, no token needed)")
-        github = github_pages_seeds(args.github_user, os.environ.get("GITHUB_TOKEN"))
-        log(f"  + {len(github)} Pages seed(s) for user '{args.github_user}'")
-        seeds.update(github)
+        github = github_pages_seeds(
+            args.github_user, os.environ.get("GITHUB_TOKEN"), {site_host, *alias_hosts}
+        )
+        mapped = [to_site_url(url, site_url, alias_hosts) for url in github]
+        on_site = {url for url in mapped if url}
+        log(f"  + {len(on_site)} Pages seed(s) on {site_host} for user '{args.github_user}'")
+        if mapped.count(None):
+            log(f"  ! {mapped.count(None)} Pages seed(s) skipped: not on {site_host} or an alias host")
+        seeds.update(on_site)
     else:
         log("Seed 2/3: GitHub Pages repos (skipped)")
 
@@ -614,8 +751,9 @@ def main() -> int:
             robots_rules, robots_sitemaps = parse_robots(decode_body(body, "text/plain"))
             for sitemap in robots_sitemaps:
                 normalized = normalize_url(sitemap)
-                if normalized and (urllib.parse.urlsplit(normalized).hostname or "").lower() == site_host:
-                    seeds.add(normalized)
+                on_site = to_site_url(normalized, site_url, alias_hosts) if normalized else None
+                if on_site:
+                    seeds.add(on_site)
             log(f"robots.txt: honoring rules, {len(robots_sitemaps)} Sitemap line(s) added as seeds")
         else:
             robots_rules = {}
@@ -626,13 +764,14 @@ def main() -> int:
     log(f"Crawling {len(seeds)} seed URL(s)...")
     pages = crawl(
         sorted(seeds),
-        site_host,
+        site_url,
         max_depth=args.max_depth,
         max_urls=args.max_urls,
         delay=args.delay,
         timeout=args.timeout,
         keep_query=args.keep_query,
         robots_rules=robots_rules,
+        alias_hosts=alias_hosts,
     )
 
     if not pages:

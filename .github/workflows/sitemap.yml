@@ -49,27 +49,42 @@ jobs:
       - name: Test generator
         run: python -m unittest discover -s tests -v
 
+      # URLs on havaianasdestruido.github.io (Pages API seeds, the helper
+      # index, links on the pages) are mapped onto pato.is-a.dev: the script
+      # sees that GitHub redirects that host to the custom domain.
       - name: Generate sitemap
         run: |
           # Remove legacy plain-text output when migrating to XML.
           rm -f sitemap.txt sitemap.xml sitemap-*.xml
-          python scripts/generate_sitemap.py \
+          summary=$(python scripts/generate_sitemap.py \
             --site-url https://pato.is-a.dev/ \
             --output sitemap.xml \
             --robots-out robots.txt \
-            --sitemap-url https://pato.is-a.dev/sitemap.xml
+            --sitemap-url https://pato.is-a.dev/sitemap.xml)
+          echo "$summary"
+          # Put the URL count on the run page, so a sitemap that suddenly
+          # shrinks is visible without opening the logs.
+          echo "::notice title=Sitemap generated::$summary"
 
       # Another commit can land on main while the crawl runs (a manual edit,
       # a merge, or a second run of this workflow). A plain `git push` then
       # fails with "fetch first" and the whole run goes red.
       #
       # So: keep the freshly generated files aside, then on every attempt
-      # reset the working tree to the current origin/main tip and copy the
+      # reset the working tree to the current tip of the branch and copy the
       # generated files over it before committing. Those files are the
-      # authoritative output, so they simply replace whatever main has —
-      # no merge, no conflict, and nothing a human committed gets lost.
+      # authoritative output, so they simply replace whatever the branch has
+      # — no merge, no conflict, and nothing a human committed gets lost.
+      #
+      # The commit goes to the branch this run was started on: main for the
+      # schedule, pushes and normal manual runs. A manual run on another
+      # branch previews the sitemap there (e.g. in a PR) instead of pushing
+      # output built from unmerged code to main.
       - name: Commit sitemap if changed
         id: commit
+        if: github.ref_type == 'branch'
+        env:
+          BRANCH: ${{ github.ref_name }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -102,9 +117,9 @@ jobs:
 
           for attempt in 1 2 3 4 5; do
             # --depth=1 keeps the shallow clone shallow; FETCH_HEAD is used
-            # instead of origin/main because actions/checkout's clone doesn't
-            # always leave a usable remote-tracking ref.
-            git fetch --quiet --depth=1 origin main
+            # instead of origin/<branch> because actions/checkout's clone
+            # doesn't always leave a usable remote-tracking ref.
+            git fetch --quiet --depth=1 origin "refs/heads/$BRANCH"
             git checkout --quiet --force --detach FETCH_HEAD
             # Remove the previous sitemap (single file or index + parts) so
             # stale sitemap-N.xml parts are deleted rather than left behind.
@@ -112,19 +127,19 @@ jobs:
             cp -p "$generated"/* .
             stage_sitemap_files
             if git diff --cached --quiet; then
-              echo "No changes (main already up to date)."
+              echo "No changes ($BRANCH already up to date)."
               exit 0
             fi
             git commit --quiet -m "chore: update sitemap"
-            if git push --quiet origin HEAD:main; then
-              echo "Pushed on attempt $attempt."
+            if git push --quiet origin "HEAD:refs/heads/$BRANCH"; then
+              echo "Pushed to $BRANCH on attempt $attempt."
               echo "pushed=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            echo "Push rejected (attempt $attempt) — main moved, retrying on the new tip."
+            echo "Push rejected (attempt $attempt) — $BRANCH moved, retrying on the new tip."
             sleep $((attempt * 5))
           done
-          echo "::error::Could not push the sitemap after 5 attempts — main kept moving."
+          echo "::error::Could not push the sitemap after 5 attempts — $BRANCH kept moving."
           exit 1
 
       # Events created with GITHUB_TOKEN never start another workflow, so the
@@ -132,8 +147,9 @@ jobs:
       # uses build_type=workflow, so without an explicit dispatch the freshly
       # committed sitemap.xml would never be published. workflow_dispatch is
       # the documented exception to that rule, so this works token-lessly.
+      # Pages serves main only, so preview runs on other branches skip this.
       - name: Redeploy Pages
-        if: steps.commit.outputs.pushed == 'true'
+        if: steps.commit.outputs.pushed == 'true' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

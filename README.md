@@ -3,8 +3,9 @@
 A **token-less** GitHub Actions workflow + Python script that builds an **XML**
 sitemap ([sitemaps.org protocol](https://www.sitemaps.org/protocol.html)) with
 **every URL** of [pato.is-a.dev](https://pato.is-a.dev/) — including all
-subpages and every GitHub Pages project site under
-`https://havaianasdestruido.github.io/<repo>/`.
+subpages and every GitHub Pages project site, served at
+`https://pato.is-a.dev/<repo>/` (the custom domain of
+`https://havaianasdestruido.github.io/`).
 
 ## Token-less by design
 
@@ -30,8 +31,29 @@ subpages and every GitHub Pages project site under
 3. **GitHub Pages discovery** — the public
    [`/users/havaianasdestruido/repos`](https://api.github.com/users/havaianasdestruido/repos)
    endpoint lists every repo with Pages enabled; each one is seeded at
-   `https://havaianasdestruido.github.io/<repo>/` and crawled for its own
+   `https://havaianasdestruido.github.io/<repo>/` (i.e.
+   `https://pato.is-a.dev/<repo>/`, see below) and crawled for its own
    subpages too.
+
+### Custom domain: `havaianasdestruido.github.io` → `pato.is-a.dev`
+
+Because the user site has the custom domain `pato.is-a.dev`, GitHub redirects
+every `https://havaianasdestruido.github.io/…` URL there — project sites
+included. The Pages API, the helper index and links on the pages (the
+homepage's "other webpages" link, for one) still use the github.io address,
+so the script treats that host as an **alias** of the site:
+
+- it is detected automatically by checking where
+  `https://havaianasdestruido.github.io/` redirects (no token, nothing to
+  configure), or can be set with `--alias-host HOST`;
+- alias URLs are rewritten onto `https://pato.is-a.dev/…` *before* they are
+  fetched, so they are crawled once and listed under the canonical address;
+- a page that redirects **off** the site (e.g. a project with its own domain)
+  is never listed, so every `<loc>` is a canonical, single-host URL.
+
+Without this, switching `--site-url` to the custom domain discarded every
+github.io seed and link as "another host" and the sitemap shrank to the
+homepage alone; `tests/test_generate_sitemap.py` reproduces that case.
 
 Requests use bounded timeouts with retries, and the sitemap is replaced
 atomically so a crash never leaves a partial file.
@@ -71,9 +93,15 @@ Protocol rules the writer enforces, so the output validates against
 - manually from the Actions tab (`workflow_dispatch`),
 
 then commits the regenerated files as `github-actions[bot]` — or does
-nothing if the sitemap didn't change.
+nothing if the sitemap didn't change. The URL count is shown as a notice on
+the run page, so a sitemap that suddenly shrinks stands out.
 
-Two details make that commit reliable:
+The commit goes to the branch the run was started on: `main` for the
+schedule, pushes and normal manual runs. Starting it manually on another
+branch is a **preview** — the regenerated sitemap is committed to that branch
+(handy in a PR) and nothing is pushed to `main` or redeployed.
+
+A few details make that commit reliable:
 
 - **It can't fail on a race.** If someone pushes to `main` while the crawl is
   running, the commit step fetches the new tip, replays the generated files
@@ -128,7 +156,10 @@ python scripts/generate_sitemap.py \
 ```
 
 Useful flags: `--seed URL` (extra start points), `--max-depth N`,
-`--max-urls N`, `--delay S`, `--no-helper`, `--no-github`, `--ignore-robots`,
+`--max-urls N`, `--delay S`, `--no-helper`, `--no-github` (also skips the
+github.io alias check), `--alias-host HOST` (a host that redirects to the
+site, e.g. `havaianasdestruido.github.io`; its URLs are listed under
+`--site-url`), `--ignore-robots`,
 `--keep-query`, `--sitemap-url URL` (the public URL written into `robots.txt`
 and used for the `<loc>` values of a sitemap index — use it when the sitemap
 is served from a subdirectory such as `/global-sitemap/`). See
