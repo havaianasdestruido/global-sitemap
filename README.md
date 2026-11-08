@@ -81,13 +81,18 @@ Two details make that commit reliable:
   dying with `! [rejected] main -> main (fetch first)`. Nothing a human
   committed is ever lost — only `sitemap.xml`, the `sitemap-N.xml` parts, the
   legacy `sitemap.txt`, and `robots.txt` are replaced.
-- **It can't fail on an empty pathspec.** The commit step stages
-  `sitemap*.xml`, the legacy `sitemap.txt`, and `robots.txt` through
-  `git ls-files -z ... | xargs -0 -r git add -A --`, then `git add -A`. A
-  plain `git add -A -- 'sitemap*.xml' sitemap.txt robots.txt` exits 128
-  ("pathspec … did not match any files") whenever one of those matches
-  nothing — which is the normal case now that `sitemap.txt` is deleted and
-  `sitemap-N.xml` parts only exist for sites over 50,000 URLs.
+- **It can't fail on an empty pathspec, and won't commit anything else.**
+  Staging goes through [`scripts/stage_sitemap_files.sh`](scripts/stage_sitemap_files.sh),
+  which resolves `sitemap*.xml`, `sitemap.txt` (legacy) and `robots.txt`
+  itself and stages that explicit list. Two traps this avoids:
+  `git add -A -- 'sitemap*.xml' sitemap.txt robots.txt` exits 128
+  ("pathspec … did not match any files") as soon as one pattern matches
+  nothing — the normal case now that `sitemap.txt` is deleted and
+  `sitemap-N.xml` parts only exist above 50,000 URLs — while a bare
+  `git add -A` would sweep in unrelated scratch files. The helper is
+  unit-tested by `tests/test_stage_sitemap_files.py` (deletion of the legacy
+  text sitemap, index + stale part, unchanged tree, and no collateral
+  staging), so the regression can't come back silently.
 - **The result actually gets published.** Pushes made with the built-in
   `GITHUB_TOKEN` don't start other workflows, so the `Deploy static content
   to Pages` workflow would otherwise never run for a bot commit and GitHub
